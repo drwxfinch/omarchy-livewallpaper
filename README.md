@@ -2,6 +2,8 @@
 
 Live video wallpapers on Hyprland with automatic pause and manual controls.
 
+![Preview](preview.png)
+
 ## Features
 
 - **Live wallpapers** via mpvpaper on the bottom layer, visible above stock Omarchy backgrounds
