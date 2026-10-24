@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "id": "morph.livewall",
+  "name": "Livewall",
+  "version": "1.0.0",
+  "author": "morph",
+  "description": "Live video wallpapers on the Hyprland background layer, with previews and automatic pause.",
+  "kinds": [
+    "bar-widget",
+    "service"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Livewall",
+    "description": "Live video wallpapers with a preview grid, mode switch, and automatic pause.",
+    "category": "Appearance",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "folder": "~/Videos",
+      "video": "",
+      "mode": "live",
+      "paused": false,
+      "autoWindows": true,
+      "autoBattery": true,
+      "autoLock": true,
+      "bind": ""
+    },
+    "schema": [
+      {
+        "key": "folder",
+        "type": "string",
+        "label": "Video folder"
+      },
+      {
+        "key": "video",
+        "type": "string",
+        "label": "Current video"
+      },
+      {
+        "key": "mode",
+        "type": "string",
+        "label": "Mode (live or static)"
+      },
+      {
+        "key": "paused",
+        "type": "boolean",
+        "label": "Paused"
+      },
+      {
+        "key": "autoWindows",
+        "type": "boolean",
+        "label": "Pause when a window covers the workspace"
+      },
+      {
+        "key": "autoBattery",
+        "type": "boolean",
+        "label": "Pause on battery"
+      },
+      {
+        "key": "autoLock",
+        "type": "boolean",
+        "label": "Pause while locked"
+      },
+      {
+        "key": "bind",
+        "type": "string",
+        "label": "Panel keybinding"
+      }
+    ]
+  }
+}

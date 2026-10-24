@@ -1,0 +1,18 @@
+# QML/Qt
+*.qmlc
+*.jsc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build/cache
+build/
+.cmake/
+CMakeLists.txt.user
