@@ -24,7 +24,7 @@ Install: `sudo pacman -S mpvpaper ffmpeg`
 ## Installation
 
 ```bash
-omarchy plugin add https://github.com/YOUR_USERNAME/livewall.git
+omarchy plugin add https://github.com/drwxfinch/omarchy-livewallpaper.git
 omarchy plugin enable morph.livewall --section right
 ```
 
