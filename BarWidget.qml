@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import qs.Ui
@@ -26,7 +28,7 @@ BarWidget {
     var n = 0
     for (var i = 0; i < root.states.length; i++) {
       var s = root.states[i]
-      if (s && s.mode === "live" && s.running && !s.paused) n++
+      if (s && s.mode === "live" && s.running && !s.paused && !s.pausing) n++
     }
     return n
   }
@@ -155,7 +157,7 @@ BarWidget {
       Qt.callLater(root.injectPanel)
     }
     onStatusChanged: {
-      if (status === Loader.Error) console.warn("Livewall: panel failed to load:", errorString())
+      if (status === Loader.Error) console.warn("Livewall: panel failed to load:", panelLoader.source)
     }
   }
 

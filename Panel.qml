@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -84,6 +86,9 @@ Panel {
 
   onMonitorListChanged: ensureSelectedMonitor()
   onDaemonChanged: ensureSelectedMonitor()
+  // open() runs before controller.show(), when opened is still false, so the
+  // first scan has to be kicked off once the panel is actually visible.
+  onOpenedChanged: if (root.opened) root.refreshScan()
 
   function ensureSelectedMonitor() {
     var list = root.monitorList
@@ -121,6 +126,7 @@ Panel {
     if (st.mode !== "live") return "Stock"
     if (st.reason === "no video" || st.reason === "video missing") return "No video"
     if (st.reason === "mpvpaper missing") return "No mpvpaper"
+    if (st.pausing) return "Pausing…"
     if (st.reason === "manual" || st.reason === "locked"
         || st.reason === "battery" || st.reason === "window") return "Paused"
     if (st.running) return "Playing"
@@ -131,6 +137,7 @@ Panel {
     var st = root.stateFor(name)
     if (!st) return Qt.darker(root.fg, 1.8)
     if (st.mode !== "live") return Qt.darker(root.fg, 1.8)
+    if (st.pausing) return Qt.darker(root.fg, 1.5)
     if (st.reason === "manual" || st.reason === "locked"
         || st.reason === "battery" || st.reason === "window") return Qt.darker(root.fg, 1.5)
     if (st.running) return Style.selectedStateColor(root.fg, root.accent)
@@ -221,6 +228,7 @@ Panel {
       if (st.video === "") return "No video selected"
       if (st.reason === "video missing") return "Selected video is missing"
       if (st.reason === "mpvpaper missing") return "mpvpaper is not installed"
+      if (st.pausing) return "Pausing…"
       if (st.reason === "manual") return "Paused manually"
       if (st.reason === "locked") return "Paused while the screen is locked"
       if (st.reason === "battery") return "Paused on battery"
@@ -548,11 +556,11 @@ Panel {
                 height: Style.space(54)
                 radius: Style.cornerRadius
                 color: chip.current
-                  ? Style.selectedStateColor(root.fg, root.accent)
+                  ? Style.selectedFillFor(root.fg, root.accent)
                   : (chip.hot ? Style.hoverFillFor(root.fg, root.accent) : Style.normalFillFor(root.fg, root.accent))
                 border.width: chip.current ? Math.max(1, Style.space(2)) : Style.spacing.hairline
                 border.color: chip.current
-                  ? Style.selectedStateColor(root.fg, root.accent)
+                  ? Style.selectedBorderFor(root.fg, root.accent)
                   : (chip.hot ? Style.hoverBorderFor(root.fg, root.accent) : Style.normalBorderFor(root.fg, root.accent))
 
                 Column {
@@ -638,14 +646,22 @@ Panel {
             foreground: root.fg
           }
 
+          Text {
+            width: parent.width
+            visible: root.multiMonitor && !root.sync
+            text: "Controls for " + root.monitorName
+            color: Qt.darker(root.fg, 1.6)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
           Row {
             width: parent.width
             spacing: Style.spacing.lg
 
             Toggle {
               width: (parent.width - parent.spacing) / 2
-              label: root.multiMonitor && !root.sync
-                ? ("Live (" + root.monitorName + ")") : "Live wallpaper"
+              label: root.multiMonitor && !root.sync ? "Live" : "Live wallpaper"
               checked: root.liveMode
               foreground: root.fg
               accent: root.accent
@@ -655,8 +671,7 @@ Panel {
 
             Toggle {
               width: (parent.width - parent.spacing) / 2
-              label: root.multiMonitor && !root.sync
-                ? ("Pause (" + root.monitorName + ")") : "Pause"
+              label: "Pause"
               checked: root.manualPause
               foreground: root.fg
               accent: root.accent
