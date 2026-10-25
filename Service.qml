@@ -10,9 +10,13 @@ import "Model.js" as Model
 //
 // One instance runs for the whole shell. It owns one mpvpaper child per
 // monitor, keeps them on the "bottom" layer (above Omarchy's background
-// surface, below windows and the bar), freezes them with SIGSTOP when the
-// wallpaper is covered, and tears every child down when the plugin is
-// disabled, removed, or the shell exits.
+// surface, below windows and the bar), freezes them with SIGSTOP when that
+// monitor's wallpaper is covered, and tears every child down when the plugin
+// is disabled, removed, or the shell exits.
+//
+// Each monitor resolves its own video/mode/pause from the shared settings
+// object (see Model.monitorSettings), probes its own file, and is reconciled
+// independently: changing one output never restarts another.
 //
 // State lives in this plugin's inline entry in ~/.config/omarchy/shell.json,
 // the same store the bar widget writes. Reading the file here is what lets the
@@ -43,6 +47,12 @@ Item {
   property var clientsJson: []
   property var covered: ({})
   property var monitorNames: []
+  // [{name, description, width, height, scale, focused}] straight from
+  // hyprctl, so the panel can show a picker without parsing again.
+  property var monitorList: []
+  // [{name, video, mode, running, paused, reason, videoOk}] for the widget and
+  // the panel. Kept as a real property so QML bindings can track it.
+  property var monitorStates: []
 
   property bool haveMpvpaper: false
   property bool haveFfmpeg: false
@@ -50,39 +60,74 @@ Item {
   property bool sweepDone: false
   property bool cleanupDone: false
   property bool lockRunning: false
-  property bool videoOk: false
   property bool pendingRefresh: false
   property string lastError: ""
   // Mirrors overallReason() so the panel can bind to a real property instead
   // of calling a function whose dependencies QML cannot track.
   property string reason: ""
 
-  readonly property string videoFile: Model.expandHome(String(settings.video || ""), home)
-  readonly property bool liveMode: String(settings.mode || "live") === "live"
-  readonly property bool manualPause: settings.paused === true
+  // Battery and lock are global by design; window coverage is per monitor.
   readonly property bool batteryPause: settings.autoBattery === true && UPower.onBattery
   readonly property bool lockPause: settings.autoLock === true && lockRunning
-  readonly property bool shouldRun: liveMode && videoOk && haveMpvpaper
+
+  function monitorConfig(name) {
+    return Model.monitorSettings(settings, name)
+  }
+
+  function monitorItemFor(name) {
+    for (var i = 0; i < monitorRepeater.count; i++) {
+      var item = monitorRepeater.itemAt(i)
+      if (item && String(item.name) === String(name)) return item
+    }
+    return null
+  }
 
   function shouldPause(name) {
-    if (manualPause || batteryPause || lockPause) return true
+    var cfg = monitorConfig(name)
+    if (cfg.paused === true) return true
+    if (batteryPause || lockPause) return true
     return settings.autoWindows === true && covered[name] === true
   }
 
   function pauseReason(name) {
-    if (!liveMode) return "static"
-    if (videoFile === "") return "no video"
-    if (!videoOk) return "video missing"
+    var cfg = monitorConfig(name)
+    if (cfg.mode !== "live") return "static"
+    if (cfg.video === "") return "no video"
+    var item = monitorItemFor(name)
+    if (item && item.videoFile !== "" && !item.videoOk) return "video missing"
     if (!haveMpvpaper) return "mpvpaper missing"
-    if (manualPause) return "manual"
+    if (cfg.paused === true) return "manual"
     if (lockPause) return "locked"
     if (batteryPause) return "battery"
     if (settings.autoWindows === true && covered[name] === true) return "window"
     return ""
   }
 
+  function stateList() {
+    var out = []
+    for (var i = 0; i < monitorRepeater.count; i++) {
+      var item = monitorRepeater.itemAt(i)
+      if (!item) continue
+      out.push({
+        name: String(item.name),
+        video: item.videoFile,
+        mode: item.liveMode ? "live" : "static",
+        running: item.alive,
+        paused: item.frozen,
+        videoOk: item.videoOk,
+        reason: pauseReason(item.name)
+      })
+    }
+    return out
+  }
+
+  function updateStates() {
+    var next = stateList()
+    if (JSON.stringify(next) !== JSON.stringify(monitorStates)) monitorStates = next
+  }
+
   function overallReason() {
-    for (var i = 0; i < monitorModel.count; i++) {
+    for (var i = 0; i < monitorRepeater.count; i++) {
       var item = monitorRepeater.itemAt(i)
       if (!item) continue
       var reason = pauseReason(item.name)
@@ -92,42 +137,70 @@ Item {
   }
 
   function statusJson() {
-    var list = []
-    for (var i = 0; i < monitorRepeater.count; i++) {
-      var item = monitorRepeater.itemAt(i)
-      if (!item) continue
-      list.push({
-        name: item.name,
-        running: item.alive,
-        paused: item.frozen,
-        reason: pauseReason(item.name)
-      })
-    }
+    var states = stateList()
+    var primary = states.length > 0 ? states[0] : null
+    var primaryCfg = primary ? monitorConfig(primary.name) : { video: "", mode: "live", paused: false }
     return JSON.stringify({
-      mode: liveMode ? "live" : "static",
-      video: videoFile,
-      videoOk: videoOk,
+      // Top-level fields kept for older callers; they describe the first
+      // monitor and the aggregate.
+      mode: primary ? primary.mode : primaryCfg.mode,
+      video: primary ? primary.video : "",
+      videoOk: primary ? primary.videoOk : false,
       mpvpaper: haveMpvpaper,
       ffmpeg: haveFfmpeg,
-      manualPause: manualPause,
+      manualPause: primaryCfg.paused === true,
+      syncMonitors: Model.syncEnabled(settings),
       reason: overallReason(),
       lastError: lastError,
-      monitors: list
+      monitors: states
     })
   }
 
   // ------------------------------------------------------------- settings
 
   function loadSettings(raw) {
-    var next = Model.parseSettings(raw, pluginId, Model.defaultSettings(home))
-    var videoChanged = String(next.video || "") !== String(settings.video || "")
-    settings = next
-    if (videoChanged) {
-      videoOk = false
-      stopAll()
-      probeVideo()
-    }
+    settings = Model.parseSettings(raw, pluginId, Model.defaultSettings(home))
+    applyMonitorSettings()
     if (depsChecked && cleanupDone) Qt.callLater(reconcile)
+  }
+
+  // Push the current settings into every live delegate. Each delegate diffs
+  // its own video, so only the outputs whose file changed restart.
+  function applyMonitorSettings() {
+    for (var i = 0; i < monitorRepeater.count; i++) {
+      var item = monitorRepeater.itemAt(i)
+      if (item) item.applyConfig()
+    }
+    if (cleanupDone) Qt.callLater(reconcile)
+  }
+
+  // Used by the IPC pause/resume commands. Writes back through the same inline
+  // entry the bar widget edits, so the change survives restarts.
+  function commitSettings(next) {
+    settings = next
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var entry = {}
+      for (var key in next) if (key !== "id") entry[key] = next[key]
+      shell.updateEntryInline(pluginId, entry)
+    }
+    applyMonitorSettings()
+  }
+
+  function setPausedFor(name, value) {
+    var target = String(name || "").trim()
+    var sync = Model.syncEnabled(settings)
+    var next = settings
+    if (target === "") {
+      if (sync) {
+        next = Model.setMonitorSetting(settings, "", { paused: value }, true)
+      } else {
+        for (var i = 0; i < monitorList.length; i++)
+          next = Model.setMonitorSetting(next, String(monitorList[i].name), { paused: value }, false)
+      }
+    } else {
+      next = Model.setMonitorSetting(settings, target, { paused: value }, sync)
+    }
+    commitSettings(next)
   }
 
   FileView {
@@ -138,36 +211,6 @@ Item {
     onLoaded: root.loadSettings(text())
     onFileChanged: reload()
     onLoadFailed: root.loadSettings("")
-  }
-
-  Process {
-    id: videoProbe
-    running: false
-    onExited: function(exitCode) {
-      root.videoOk = exitCode === 0
-      if (root.videoProbePending) {
-        root.videoProbePending = false
-        root.probeVideo()
-        return
-      }
-      root.reconcile()
-    }
-  }
-
-  property bool videoProbePending: false
-
-  function probeVideo() {
-    if (videoFile === "") {
-      videoOk = false
-      if (cleanupDone) Qt.callLater(reconcile)
-      return
-    }
-    if (videoProbe.running) {
-      videoProbePending = true
-      return
-    }
-    videoProbe.command = ["test", "-f", videoFile]
-    videoProbe.running = true
   }
 
   // ---------------------------------------------------------- dependencies
@@ -335,6 +378,13 @@ Item {
       id: monitorItem
       required property string name
 
+      // Resolved from settings by applyConfig().
+      property string videoFile: ""
+      property bool liveMode: true
+      property bool manualPause: false
+      property bool videoOk: false
+      property bool probePending: false
+
       property bool frozen: false
       property bool stopping: false
       property bool restartAfterStop: false
@@ -342,11 +392,56 @@ Item {
       property int failures: 0
 
       readonly property bool alive: worker.running
+      readonly property bool shouldRun: liveMode && videoFile !== "" && videoOk && root.haveMpvpaper
+
+      onAliveChanged: root.updateStates()
+      onFrozenChanged: root.updateStates()
+      onVideoOkChanged: root.updateStates()
+      onLiveModeChanged: root.updateStates()
+
+      // Re-read this output's effective settings and act on the diff. The
+      // video is compared before it is assigned so an unchanged output keeps
+      // its process (and its decoded frames) untouched.
+      function applyConfig() {
+        var cfg = root.monitorConfig(name)
+        var nextVideo = Model.expandHome(cfg.video, root.home)
+        var nextLive = cfg.mode === "live"
+        var nextPaused = cfg.paused === true
+        var videoChanged = nextVideo !== videoFile
+
+        videoFile = nextVideo
+        liveMode = nextLive
+        manualPause = nextPaused
+
+        if (videoChanged) {
+          videoOk = false
+          if (worker.running || stopping) stopWallpaper(false)
+          probeFile()
+          return
+        }
+        // Recover if the file appears after having been missing.
+        if (!videoOk && videoFile !== "" && !probe.running && !probePending) probeFile()
+        Qt.callLater(root.reconcile)
+      }
+
+      function probeFile() {
+        if (videoFile === "") {
+          videoOk = false
+          Qt.callLater(root.reconcile)
+          return
+        }
+        if (probe.running) {
+          probePending = true
+          return
+        }
+        probe.command = ["test", "-f", videoFile]
+        probe.running = true
+      }
 
       function startWallpaper() {
         if (worker.running) return
         root.lastError = ""
-        worker.command = ["mpvpaper", "-l", "bottom", "-o", root.mpvOptions, name, root.videoFile]
+        worker.command = ["mpvpaper", "-l", "bottom", "-o", root.mpvOptions, name, videoFile]
         worker.running = true
         frozen = false
         startedAt = Date.now() / 1000
@@ -398,6 +493,16 @@ Item {
         frozen = false
       }
 
+      function reconcile() {
+        if (!shouldRun) {
+          stopWallpaper(false)
+          return
+        }
+        ensureRunning()
+        if (root.shouldPause(name)) pauseWallpaper()
+        else resumeWallpaper()
+      }
+
       function handleExit(exitCode) {
         if (stopping) {
           var restart = restartAfterStop
@@ -422,6 +527,22 @@ Item {
         onExited: function(exitCode) { monitorItem.handleExit(exitCode) }
       }
 
+      // One file probe per monitor: the single shared probe could only ever
+      // describe one output's video.
+      Process {
+        id: probe
+        running: false
+        onExited: function(exitCode) {
+          monitorItem.videoOk = exitCode === 0
+          if (monitorItem.probePending) {
+            monitorItem.probePending = false
+            monitorItem.probeFile()
+            return
+          }
+          root.reconcile()
+        }
+      }
+
       Timer {
         id: graceTimer
         repeat: false
@@ -432,7 +553,7 @@ Item {
         id: retryTimer
         repeat: false
         onTriggered: {
-          if (root.shouldRun && !worker.running) monitorItem.startWallpaper()
+          if (monitorItem.shouldRun && !worker.running) monitorItem.startWallpaper()
         }
       }
 
@@ -444,6 +565,7 @@ Item {
         onTriggered: if (worker.running) worker.signal(9)
       }
 
+      Component.onCompleted: applyConfig()
       Component.onDestruction: hardStop()
     }
   }
@@ -466,48 +588,48 @@ Item {
     }
   }
 
+  function monitorEntry(monitor) {
+    return {
+      name: String(monitor.name),
+      description: String(monitor.description || ""),
+      width: Math.round(Number(monitor.width || 0)),
+      height: Math.round(Number(monitor.height || 0)),
+      scale: Number(monitor.scale || 1),
+      focused: monitor.focused === true
+    }
+  }
+
   function applyState() {
     var names = []
+    var list = []
     var next = {}
     for (var i = 0; i < monitorsJson.length; i++) {
       var monitor = monitorsJson[i]
       if (!monitor || !monitor.name) continue
       var name = String(monitor.name)
       names.push(name)
+      list.push(monitorEntry(monitor))
       next[name] = Model.hasCoveringWindow(monitor, clientsJson)
     }
     covered = next
+    monitorList = list
     monitorNames = names
     syncMonitors(names)
-    Qt.callLater(reconcile)
-  }
-
-  function stopAll() {
-    for (var i = 0; i < monitorRepeater.count; i++) {
-      var item = monitorRepeater.itemAt(i)
-      if (item) item.stopWallpaper(false)
-    }
+    applyMonitorSettings()
   }
 
   function reconcile() {
     if (!cleanupDone) return
     for (var i = 0; i < monitorRepeater.count; i++) {
       var item = monitorRepeater.itemAt(i)
-      if (!item) continue
-      if (!shouldRun) {
-        item.stopWallpaper(false)
-        continue
-      }
-      item.ensureRunning()
-      if (shouldPause(item.name)) item.pauseWallpaper()
-      else item.resumeWallpaper()
+      if (item) item.reconcile()
     }
+    updateStates()
     var next = overallReason()
     if (next !== reason) reason = next
   }
 
   onCoveredChanged: if (cleanupDone) Qt.callLater(reconcile)
-  onShouldRunChanged: if (cleanupDone) Qt.callLater(reconcile)
 
   Connections {
     target: UPower
@@ -523,6 +645,15 @@ Item {
 
     function refresh(): void {
       root.refresh()
+    }
+
+    // `omarchy-shell morph.livewall pause DP-1`; an empty argument means all.
+    function pause(monitor: string): void {
+      root.setPausedFor(monitor, true)
+    }
+
+    function resume(monitor: string): void {
+      root.setPausedFor(monitor, false)
     }
   }
 
