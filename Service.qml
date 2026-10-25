@@ -114,6 +114,7 @@ Item {
         mode: item.liveMode ? "live" : "static",
         running: item.alive,
         paused: item.frozen,
+        pausing: item.pausePending,
         videoOk: item.videoOk,
         reason: pauseReason(item.name)
       })
@@ -386,6 +387,9 @@ Item {
       property bool probePending: false
 
       property bool frozen: false
+      // True while the 2 s grace window delays a freeze after a start. Exposed
+      // in the status so "reason set but not frozen yet" is never ambiguous.
+      property bool pausePending: false
       property bool stopping: false
       property bool restartAfterStop: false
       property real startedAt: 0
@@ -396,6 +400,7 @@ Item {
 
       onAliveChanged: root.updateStates()
       onFrozenChanged: root.updateStates()
+      onPausePendingChanged: root.updateStates()
       onVideoOkChanged: root.updateStates()
       onLiveModeChanged: root.updateStates()
 
@@ -444,6 +449,7 @@ Item {
         worker.command = ["mpvpaper", "-l", "bottom", "-o", root.mpvOptions, name, videoFile]
         worker.running = true
         frozen = false
+        pausePending = false
         startedAt = Date.now() / 1000
       }
 
@@ -461,6 +467,7 @@ Item {
         if (frozen) worker.signal(18)
         worker.signal(15)
         frozen = false
+        pausePending = false
         stopping = true
         restartAfterStop = restart === true
         killTimer.restart()
@@ -472,6 +479,7 @@ Item {
         if (frozen) worker.signal(18)
         worker.signal(15)
         frozen = false
+        pausePending = false
       }
 
       function pauseWallpaper() {
@@ -479,18 +487,24 @@ Item {
         var age = Date.now() / 1000 - startedAt
         var graceLeft = root.graceMs / 1000 - age
         if (graceLeft > 0) {
+          pausePending = true
           graceTimer.interval = Math.max(100, Math.round(graceLeft * 1000))
           graceTimer.restart()
           return
         }
         worker.signal(19)
         frozen = true
+        pausePending = false
       }
 
       function resumeWallpaper() {
-        if (!worker.running || !frozen) return
+        if (!worker.running || !frozen) {
+          pausePending = false
+          return
+        }
         worker.signal(18)
         frozen = false
+        pausePending = false
       }
 
       function reconcile() {
@@ -504,6 +518,7 @@ Item {
       }
 
       function handleExit(exitCode) {
+        pausePending = false
         if (stopping) {
           var restart = restartAfterStop
           stopping = false
