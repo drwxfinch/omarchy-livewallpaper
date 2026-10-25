@@ -6,13 +6,18 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// Livewall's popup: mode and pause switches, a preview grid of the videos in
-// the chosen folder, the folder field, the automatic-pause switches, and the
-// keybinding helper.
+// Livewall's popup: a monitor picker, sync switch, mode and pause switches, a
+// preview grid of the videos in the chosen folder, the folder field, the
+// automatic-pause switches, and the keybinding helper.
+//
+// With one output the picker is hidden and the panel behaves exactly like the
+// single-monitor version. With several, the grid, mode and pause switches act
+// on the selected output unless "Same on all monitors" is on.
 //
 // Video frames are rendered by ffmpeg through three workers at most, only
 // while the panel is open. scan.sh reports which cache files already exist,
 // so reopening the panel costs one directory walk and no decoding at all.
+// The thumbnail cache is shared by every monitor.
 Panel {
   id: root
   moduleName: "morph.livewall"
@@ -37,13 +42,36 @@ Panel {
   // moves with it and no path outside the plugin is assumed.
   readonly property string scanScript: decodeURIComponent(String(Qt.resolvedUrl("scan.sh")).replace("file://", ""))
 
-  readonly property bool liveMode: String(setting("mode", "live")) === "live"
-  readonly property bool manualPause: boolSetting("paused", false)
+  // ------------------------------------------------------------- monitors
+
+  property string selectedMonitor: ""
+
+  readonly property var monitorList: root.daemon && root.daemon.monitorList ? root.daemon.monitorList : []
+  readonly property bool multiMonitor: monitorList.length > 1
+  readonly property bool sync: Model.syncEnabled(root.settings)
+
+  // The selected output, falling back to the first one while the daemon is
+  // still starting or after a hotplug removed the previous selection.
+  readonly property string monitorName: {
+    var list = root.monitorList
+    if (list.length === 0) return ""
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].name) === root.selectedMonitor) return root.selectedMonitor
+    }
+    return String(list[0].name)
+  }
+
+  // Effective settings for the selected output. With sync on this is the flat
+  // set, so the whole panel keeps working without a monitor attached.
+  readonly property var currentConfig: Model.monitorSettings(root.settings, root.monitorName)
+  readonly property bool liveMode: currentConfig.mode === "live"
+  readonly property bool manualPause: currentConfig.paused === true
+  readonly property string selectedVideo: currentConfig.video
+
   readonly property bool autoWindows: boolSetting("autoWindows", true)
   readonly property bool autoBattery: boolSetting("autoBattery", true)
   readonly property bool autoLock: boolSetting("autoLock", true)
   readonly property string folder: String(setting("folder", home + "/Videos"))
-  readonly property string selectedVideo: String(setting("video", ""))
   readonly property int columns: 3
 
   // ffmpeg is what renders the previews. Without it the grid still lists the
@@ -52,6 +80,84 @@ Panel {
 
   function boolSetting(name, fallback) {
     return Model.coerce(setting(name, fallback)) === true
+  }
+
+  onMonitorListChanged: ensureSelectedMonitor()
+  onDaemonChanged: ensureSelectedMonitor()
+
+  function ensureSelectedMonitor() {
+    var list = root.monitorList
+    if (list.length === 0) return
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].name) === root.selectedMonitor) return
+    }
+    root.selectedMonitor = String(list[0].name)
+  }
+
+  function stateFor(name) {
+    var states = root.daemon ? root.daemon.monitorStates : null
+    if (!states) return null
+    for (var i = 0; i < states.length; i++) {
+      if (String(states[i].name) === String(name)) return states[i]
+    }
+    return null
+  }
+
+  function monitorResolution(name) {
+    var list = root.monitorList
+    for (var i = 0; i < list.length; i++) {
+      if (String(list[i].name) !== String(name)) continue
+      var w = Number(list[i].width || 0)
+      var h = Number(list[i].height || 0)
+      if (w <= 0 || h <= 0) return ""
+      return w + "×" + h
+    }
+    return ""
+  }
+
+  function stateLabel(name) {
+    var st = root.stateFor(name)
+    if (!st) return "…"
+    if (st.mode !== "live") return "Stock"
+    if (st.reason === "no video" || st.reason === "video missing") return "No video"
+    if (st.reason === "mpvpaper missing") return "No mpvpaper"
+    if (st.reason === "manual" || st.reason === "locked"
+        || st.reason === "battery" || st.reason === "window") return "Paused"
+    if (st.running) return "Playing"
+    return "Idle"
+  }
+
+  function stateColor(name) {
+    var st = root.stateFor(name)
+    if (!st) return Qt.darker(root.fg, 1.8)
+    if (st.mode !== "live") return Qt.darker(root.fg, 1.8)
+    if (st.reason === "manual" || st.reason === "locked"
+        || st.reason === "battery" || st.reason === "window") return Qt.darker(root.fg, 1.5)
+    if (st.running) return Style.selectedStateColor(root.fg, root.accent)
+    return Qt.darker(root.fg, 1.8)
+  }
+
+  readonly property bool anyPlaying: {
+    var states = root.daemon ? root.daemon.monitorStates : null
+    if (!states) return false
+    for (var i = 0; i < states.length; i++) {
+      var s = states[i]
+      if (s && s.mode === "live" && s.running && !s.paused) return true
+    }
+    return false
+  }
+
+  // Saved outputs that are not connected right now. Their settings are kept
+  // until the user explicitly forgets them.
+  readonly property var staleMonitors: {
+    var saved = root.settings.monitors
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return []
+    var live = {}
+    for (var i = 0; i < root.monitorList.length; i++)
+      live[String(root.monitorList[i].name)] = true
+    var out = []
+    for (var key in saved) if (!live[String(key)]) out.push(String(key))
+    return out
   }
 
   // ------------------------------------------------------------- lifecycle
@@ -64,6 +170,7 @@ Panel {
 
   function open() {
     attach()
+    ensureSelectedMonitor()
     refresh()
     root.controller.show()
     // Set after showing: showing hands the popout coordinator over, and that
@@ -107,25 +214,24 @@ Panel {
 
   // ---------------------------------------------------------------- status
 
-  readonly property string monitorLabel: {
-    var names = daemon ? daemon.monitorNames : null
-    return names && names.length > 0 ? names.join(", ") : "this display"
-  }
-
   readonly property string statusText: {
+    var st = root.stateFor(root.monitorName)
+    if (st) {
+      if (st.mode !== "live") return "Stock wallpaper"
+      if (st.video === "") return "No video selected"
+      if (st.reason === "video missing") return "Selected video is missing"
+      if (st.reason === "mpvpaper missing") return "mpvpaper is not installed"
+      if (st.reason === "manual") return "Paused manually"
+      if (st.reason === "locked") return "Paused while the screen is locked"
+      if (st.reason === "battery") return "Paused on battery"
+      if (st.reason === "window") return "Paused: a window covers this workspace"
+      if (st.running) return "Playing on " + st.name
+      return "Waiting to start"
+    }
+    // Daemon not attached yet.
     if (!root.liveMode) return "Stock wallpaper"
     if (root.selectedVideo === "") return "No video selected"
-    var d = root.daemon
-    if (!d) return "Starting…"
-    if (d.haveMpvpaper === false) return "mpvpaper is not installed"
-    if (d.videoOk === false) return "Selected video is missing"
-    var reason = String(d.reason || "")
-    if (reason === "manual") return "Paused manually"
-    if (reason === "locked") return "Paused while the screen is locked"
-    if (reason === "battery") return "Paused on battery"
-    if (reason === "window") return "Paused: a window covers the workspace"
-    if (reason === "video missing") return "Selected video is missing"
-    return "Playing on " + root.monitorLabel
+    return "Starting…"
   }
 
   readonly property bool playing: liveMode && statusText.indexOf("Playing") === 0
@@ -142,41 +248,84 @@ Panel {
 
   // Applied locally first so the panel redraws on the click itself; the
   // shell.json write comes back through the bar as the same value.
-  function persistSettings(values) {
-    var entry = { id: root.moduleName }
-    for (var existing in root.settings) if (existing !== "id") entry[existing] = root.settings[existing]
-    for (var key in values) entry[key] = values[key]
-
-    root.settings = entry
-    if (root.hostWidget && "settings" in root.hostWidget) root.hostWidget.settings = entry
-    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+  function commitSettings(next) {
+    root.settings = next
+    if (root.hostWidget && "settings" in root.hostWidget) root.hostWidget.settings = next
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function") {
+      var entry = { id: root.moduleName }
+      for (var key in next) if (key !== "id") entry[key] = next[key]
       root.bar.shell.updateEntryInline(root.moduleName, entry)
+    }
   }
 
   function setMode(live) {
-    persistSettings({ mode: live ? "live" : "static" })
+    commitSettings(Model.setMonitorSetting(root.settings, root.monitorName,
+      { mode: live ? "live" : "static" }, root.sync))
   }
 
   function setPaused(value) {
-    persistSettings({ paused: value })
+    commitSettings(Model.setMonitorSetting(root.settings, root.monitorName,
+      { paused: value }, root.sync))
+  }
+
+  function setPausedAll(value) {
+    var next = root.settings
+    if (root.sync) {
+      next = Model.setMonitorSetting(next, "", { paused: value }, true)
+    } else if (root.monitorList.length === 0) {
+      next = Model.setMonitorSetting(next, "", { paused: value }, true)
+    } else {
+      for (var i = 0; i < root.monitorList.length; i++)
+        next = Model.setMonitorSetting(next, String(root.monitorList[i].name), { paused: value }, false)
+    }
+    commitSettings(next)
+  }
+
+  function setSync(value) {
+    var next = root.settings
+    if (value) {
+      // Adopt the selected output's current look for every monitor.
+      var cfg = Model.monitorSettings(root.settings, root.monitorName)
+      next = Model.setMonitorSetting(next, root.monitorName, {
+        video: cfg.video, mode: cfg.mode, paused: cfg.paused
+      }, true)
+    } else {
+      // Seed each connected output with its effective values, so turning sync
+      // off does not make any wallpaper jump to a different video.
+      for (var i = 0; i < root.monitorList.length; i++) {
+        var name = String(root.monitorList[i].name)
+        var eff = Model.monitorSettings(root.settings, name)
+        next = Model.setMonitorSetting(next, name, {
+          video: eff.video, mode: eff.mode, paused: eff.paused
+        }, false)
+      }
+      next = Model.withSetting(next, "syncMonitors", false)
+    }
+    commitSettings(next)
   }
 
   function setAuto(key, value) {
-    var values = {}
-    values[key] = value
-    persistSettings(values)
+    commitSettings(Model.withSetting(root.settings, key, value))
   }
 
   function chooseVideo(path) {
     if (path === root.selectedVideo) return
-    persistSettings({ video: path })
+    commitSettings(Model.setMonitorSetting(root.settings, root.monitorName,
+      { video: path }, root.sync))
   }
 
   function applyFolder() {
     var next = String(folderField.text || "").trim()
     if (next === "") return
-    persistSettings({ folder: next })
+    commitSettings(Model.withSetting(root.settings, "folder", next))
     refreshScan()
+  }
+
+  function pruneDisconnected() {
+    var names = []
+    for (var i = 0; i < root.monitorList.length; i++)
+      names.push(String(root.monitorList[i].name))
+    commitSettings(Model.pruneMonitors(root.settings, names))
   }
 
   function bindLineFor(combo) {
@@ -188,7 +337,7 @@ Panel {
   readonly property string bindLine: bindLineFor(setting("bind", ""))
 
   function applyBind() {
-    persistSettings({ bind: String(bindField.text || "").trim() })
+    commitSettings(Model.withSetting(root.settings, "bind", String(bindField.text || "").trim()))
   }
 
   function copyBind() {
@@ -376,6 +525,96 @@ Panel {
             }
           }
 
+          // ------------------------------------------------- monitor picker
+
+          Row {
+            id: monitorRow
+            width: parent.width
+            spacing: Style.spacing.sm
+            visible: root.multiMonitor
+
+            Repeater {
+              model: root.monitorList
+
+              delegate: Rectangle {
+                id: chip
+                required property var modelData
+                readonly property string outputName: String(modelData.name)
+                readonly property bool current: chip.outputName === root.monitorName
+                readonly property bool hot: chipMouse.containsMouse
+
+                width: (monitorRow.width - monitorRow.spacing * Math.max(0, root.monitorList.length - 1))
+                  / Math.max(1, root.monitorList.length)
+                height: Style.space(54)
+                radius: Style.cornerRadius
+                color: chip.current
+                  ? Style.selectedStateColor(root.fg, root.accent)
+                  : (chip.hot ? Style.hoverFillFor(root.fg, root.accent) : Style.normalFillFor(root.fg, root.accent))
+                border.width: chip.current ? Math.max(1, Style.space(2)) : Style.spacing.hairline
+                border.color: chip.current
+                  ? Style.selectedStateColor(root.fg, root.accent)
+                  : (chip.hot ? Style.hoverBorderFor(root.fg, root.accent) : Style.normalBorderFor(root.fg, root.accent))
+
+                Column {
+                  anchors.centerIn: parent
+                  width: parent.width - Style.space(10)
+                  spacing: Style.spacing.xxs
+
+                  Text {
+                    width: parent.width
+                    text: chip.outputName
+                    color: chip.current ? Style.selectedStateColor(root.fg, root.accent) : root.fg
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: root.monitorResolution(chip.outputName)
+                    visible: text !== ""
+                    color: Qt.darker(root.fg, 1.8)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: root.stateLabel(chip.outputName)
+                    color: root.stateColor(chip.outputName)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideRight
+                  }
+                }
+
+                MouseArea {
+                  id: chipMouse
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.selectedMonitor = chip.outputName
+                }
+              }
+            }
+          }
+
+          Toggle {
+            width: parent.width
+            visible: root.multiMonitor
+            label: "Same on all monitors"
+            checked: root.sync
+            foreground: root.fg
+            accent: root.accent
+            fontFamily: root.fontFamily
+            onClicked: root.setSync(!root.sync)
+          }
+
           Text {
             width: parent.width
             text: root.statusText
@@ -405,7 +644,8 @@ Panel {
 
             Toggle {
               width: (parent.width - parent.spacing) / 2
-              label: "Live wallpaper"
+              label: root.multiMonitor && !root.sync
+                ? ("Live (" + root.monitorName + ")") : "Live wallpaper"
               checked: root.liveMode
               foreground: root.fg
               accent: root.accent
@@ -415,7 +655,8 @@ Panel {
 
             Toggle {
               width: (parent.width - parent.spacing) / 2
-              label: "Pause"
+              label: root.multiMonitor && !root.sync
+                ? ("Pause (" + root.monitorName + ")") : "Pause"
               checked: root.manualPause
               foreground: root.fg
               accent: root.accent
@@ -424,13 +665,36 @@ Panel {
             }
           }
 
+          Button {
+            width: parent.width
+            visible: root.multiMonitor
+            text: root.anyPlaying ? "Pause all monitors" : "Resume all monitors"
+            foreground: root.fg
+            accent: root.accent
+            fontFamily: root.fontFamily
+            onClicked: root.setPausedAll(root.anyPlaying)
+          }
+
+          Button {
+            width: parent.width
+            visible: root.staleMonitors.length > 0
+            text: root.staleMonitors.length === 1
+              ? "Forget disconnected monitor (" + root.staleMonitors[0] + ")"
+              : "Forget " + root.staleMonitors.length + " disconnected monitors"
+            foreground: root.fg
+            accent: root.accent
+            fontFamily: root.fontFamily
+            onClicked: root.pruneDisconnected()
+          }
+
           Item {
             width: parent.width
             height: videoHeader.implicitHeight
 
             PanelSectionHeader {
               id: videoHeader
-              text: "VIDEO"
+              text: root.multiMonitor && !root.sync
+                ? ("VIDEO · " + root.monitorName) : "VIDEO"
               foreground: root.fg
               fontFamily: root.fontFamily
             }
@@ -621,7 +885,8 @@ Panel {
 
           Text {
             width: parent.width
-            text: "Freezes on a covered workspace, on battery, and while locked."
+            text: "Freezes on a covered workspace, on battery, and while locked. "
+              + "A fullscreen window only pauses its own monitor."
             color: Qt.darker(root.fg, 1.8)
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

@@ -5,22 +5,47 @@ import "Model.js" as Model
 
 // Bar button for the Livewall panel.
 //
-// Left click opens the panel, right click flips the manual pause so the video
-// can be frozen without opening anything. The daemon lives in Service.qml; this
-// widget only mirrors the settings it needs for its icon state.
+// Left click opens the panel. Right click pauses every monitor when at least
+// one is playing, and resumes every monitor otherwise. The daemon lives in
+// Service.qml; this widget mirrors its aggregate state for the icon and
+// tooltip, and reads the flat settings only as a fallback before the service
+// has been attached.
 BarWidget {
   id: root
   moduleName: "morph.livewall"
 
-  readonly property bool liveMode: String(setting("mode", "live")) === "live"
-  readonly property bool paused: Model.coerce(setting("paused", false)) === true
-  readonly property string video: String(setting("video", ""))
-  readonly property bool playing: liveMode && !paused && video !== ""
+  property var daemon: null
+
+  readonly property var flatConfig: Model.monitorSettings(root.settings, "")
+  readonly property bool liveMode: flatConfig.mode === "live"
+  readonly property bool paused: flatConfig.paused === true
+  readonly property string video: flatConfig.video
+
+  readonly property var states: root.daemon && root.daemon.monitorStates ? root.daemon.monitorStates : []
+  readonly property int playingCount: {
+    var n = 0
+    for (var i = 0; i < root.states.length; i++) {
+      var s = root.states[i]
+      if (s && s.mode === "live" && s.running && !s.paused) n++
+    }
+    return n
+  }
+  readonly property bool anyPlaying: playingCount > 0
+  readonly property bool playing: {
+    if (root.states.length > 0) return root.anyPlaying
+    return root.liveMode && !root.paused && root.video !== ""
+  }
 
   // Shape contract for shell.summon/hide/toggle routing: Bar.findPanelWidget
   // requires open/close/opened on the bar-widget root.
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
+
+  function attach() {
+    if (root.daemon) return
+    if (root.bar && root.bar.shell && typeof root.bar.shell.serviceFor === "function")
+      root.daemon = root.bar.shell.serviceFor(root.moduleName)
+  }
 
   function open() {
     if (!panelLoader.item) {
@@ -42,17 +67,33 @@ BarWidget {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
   }
 
-  // Mirrors Panel.persistSettings for the right-click shortcut, which has no
-  // panel open to do it for it.
-  function setPaused(value) {
-    var entry = { id: root.moduleName }
-    for (var key in root.settings) if (key !== "id") entry[key] = root.settings[key]
-    entry.paused = value
-
-    root.settings = entry
-    if (panelLoader.item && "settings" in panelLoader.item) panelLoader.item.settings = entry
-    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+  function commitSettings(next) {
+    root.settings = next
+    if (panelLoader.item && "settings" in panelLoader.item) panelLoader.item.settings = next
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function") {
+      var entry = { id: root.moduleName }
+      for (var key in next) if (key !== "id") entry[key] = next[key]
       root.bar.shell.updateEntryInline(root.moduleName, entry)
+    }
+  }
+
+  // Quick "pause everything" from the bar. With sync on the flat pause flag is
+  // enough; with sync off every connected output gets its own entry.
+  function toggleAllPause() {
+    var target = !root.anyPlaying
+    var next = root.settings
+    if (Model.syncEnabled(root.settings)) {
+      next = Model.setMonitorSetting(next, "", { paused: target }, true)
+    } else {
+      var list = root.daemon ? root.daemon.monitorList : []
+      if (list.length === 0) {
+        next = Model.setMonitorSetting(next, "", { paused: target }, true)
+      } else {
+        for (var i = 0; i < list.length; i++)
+          next = Model.setMonitorSetting(next, String(list[i].name), { paused: target }, false)
+      }
+    }
+    commitSettings(next)
   }
 
   function injectPanel() {
@@ -62,6 +103,27 @@ BarWidget {
     if ("settings" in target) target.settings = root.settings
     if ("anchorItem" in target) target.anchorItem = button
     if ("hostWidget" in target) target.hostWidget = root
+    if ("daemon" in target && root.daemon) target.daemon = root.daemon
+  }
+
+  readonly property string summaryText: {
+    var list = root.states
+    if (list && list.length > 0) {
+      if (list.length === 1) {
+        var s = list[0]
+        if (s.mode !== "live") return "Livewall: stock wallpaper"
+        if (s.video === "") return "Livewall: no video selected"
+        if (s.paused || s.reason === "manual") return "Livewall: paused"
+        if (s.running) return "Livewall: playing on " + s.name
+        return "Livewall: starting"
+      }
+      if (root.playingCount === 0) return "Livewall: all paused"
+      if (root.playingCount === list.length) return "Livewall: all " + list.length + " playing"
+      return "Livewall: " + root.playingCount + " of " + list.length + " playing"
+    }
+    if (!root.liveMode) return "Livewall: stock wallpaper"
+    if (root.video === "") return "Livewall: no video selected"
+    return root.paused ? "Livewall: paused" : "Livewall: playing"
   }
 
   implicitWidth: button.implicitWidth
@@ -69,6 +131,19 @@ BarWidget {
 
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
+  onDaemonChanged: {
+    injectPanel()
+    if (root.daemon && typeof root.daemon.refresh === "function") root.daemon.refresh()
+  }
+
+  Component.onCompleted: root.attach()
+
+  Timer {
+    interval: 500
+    repeat: true
+    running: !root.daemon
+    onTriggered: root.attach()
+  }
 
   Loader {
     id: panelLoader
@@ -90,14 +165,10 @@ BarWidget {
     bar: root.bar
     text: "\uf03d"
     active: root.playing
-    tooltipText: !root.liveMode
-      ? "Livewall: stock wallpaper"
-      : (root.video === ""
-        ? "Livewall: no video selected"
-        : (root.paused ? "Livewall: paused" : "Livewall: playing"))
+    tooltipText: root.summaryText
 
     onPressed: function(b) {
-      if (b === Qt.RightButton) root.setPaused(!root.paused)
+      if (b === Qt.RightButton) root.toggleAllPause()
       else root.togglePanel()
     }
   }

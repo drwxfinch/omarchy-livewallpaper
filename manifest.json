@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "morph.livewall",
   "name": "Livewall",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "morph",
-  "description": "Live video wallpapers on the Hyprland background layer, with previews and automatic pause.",
+  "description": "Live video wallpapers on the Hyprland background layer, per monitor, with previews and automatic pause.",
   "kinds": [
     "bar-widget",
     "service"
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Livewall",
-    "description": "Live video wallpapers with a preview grid, mode switch, and automatic pause.",
+    "description": "Live video wallpapers with a per-monitor preview grid, sync switch, and automatic pause.",
     "category": "Appearance",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -24,6 +24,8 @@
       "video": "",
       "mode": "live",
       "paused": false,
+      "syncMonitors": true,
+      "monitors": {},
       "autoWindows": true,
       "autoBattery": true,
       "autoLock": true,
@@ -38,17 +40,27 @@
       {
         "key": "video",
         "type": "string",
-        "label": "Current video"
+        "label": "Default video (all monitors when sync is on)"
       },
       {
         "key": "mode",
         "type": "string",
-        "label": "Mode (live or static)"
+        "label": "Default mode: live or static"
       },
       {
         "key": "paused",
         "type": "boolean",
-        "label": "Paused"
+        "label": "Default manual pause"
+      },
+      {
+        "key": "syncMonitors",
+        "type": "boolean",
+        "label": "Use the same wallpaper on all monitors"
+      },
+      {
+        "key": "monitors",
+        "type": "object",
+        "label": "Per-monitor settings keyed by output name"
       },
       {
         "key": "autoWindows",
