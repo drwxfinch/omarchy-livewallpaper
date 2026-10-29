@@ -13,12 +13,30 @@
 
 set -u
 
+# Thumbnails are frames decoded from the user's videos. They must not become
+# world-readable just because the login umask is 022, so the cache is created
+# private (0700) and repaired on every run in case it already existed.
+umask 077
+
 folder=${1:-}
 cache=${2:-}
 limit=${3:-120}
 
 [[ -n $folder && -d $folder && -n $cache ]] || exit 0
 mkdir -p -- "$cache" 2>/dev/null || exit 0
+chmod 700 -- "$cache" 2>/dev/null
+
+# The parent is ours as well (it only ever holds the thumbnails), but it is
+# tightened only when it is literally named morph.livewall: scan.sh must never
+# chmod a directory it did not create, whatever cache path it is handed.
+parent=${cache%/*}
+[[ ${parent##*/} == morph.livewall ]] && chmod 700 -- "$parent" 2>/dev/null
+
+# Older versions created the cache with the ambient umask, so tighten any
+# thumbnail that is still readable by group or others. Only our own files are
+# touched; failures are ignored.
+find "$cache" -maxdepth 1 -type f -name '*.jpg' ! -perm 600 \
+  -exec chmod 600 -- {} + 2>/dev/null
 
 find -L "$folder" -maxdepth 3 -type f \
   \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.webm' \

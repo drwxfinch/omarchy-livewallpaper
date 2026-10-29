@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "morph.livewall",
   "name": "Livewall",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "morph",
   "description": "Live video wallpapers on the Hyprland background layer, per monitor, with previews and automatic pause.",
   "kinds": [

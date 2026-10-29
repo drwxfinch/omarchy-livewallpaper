@@ -419,8 +419,11 @@ Panel {
     var item = videoModel.get(index)
     videoModel.setProperty(index, "claimed", true)
     worker.jobIndex = index
-    worker.command = ["ffmpeg", "-v", "error", "-nostdin", "-ss", "1", "-i", item.path,
-      "-frames:v", "1", "-vf", "scale=320:-2", "-y", item.thumb]
+    // umask 077 so a thumbnail decoded from a private video is never created
+    // readable by other local accounts; the cache directory itself is 0700.
+    worker.command = ["bash", "-c",
+      'umask 077; exec ffmpeg -v error -nostdin -ss 1 -i "$1" -frames:v 1 -vf scale=320:-2 -y "$2"',
+      "livewall-thumb", item.path, item.thumb]
     worker.running = true
   }
 
