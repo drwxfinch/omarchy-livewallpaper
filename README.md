@@ -18,10 +18,12 @@ Live video wallpapers on Hyprland with per-monitor control and automatic pause.
 
 ## Dependencies
 
-- `mpvpaper` — live wallpaper renderer
-- `ffmpeg` — video thumbnail generation
+- `ffmpeg` — video thumbnail generation (official Arch repositories)
+- `mpvpaper` — live wallpaper renderer (AUR package `mpvpaper`)
 
-Install: `sudo pacman -S mpvpaper ffmpeg`
+Install both with the package manager and AUR helper you normally use. The
+plugin never asks for root: it starts `mpvpaper` and `ffmpeg` as your user and
+nothing else.
 
 ## Installation
 
@@ -123,6 +125,18 @@ The cache is created with mode `0700` and its thumbnails with `0600`, so another
 local account cannot read frames decoded from a `0600` video or a `0700` folder
 even when the login umask is `022`. Existing caches are tightened on the next
 panel open. The plugin does not rely on `$HOME` being `0700`.
+
+## Security notes
+
+The plugin runs entirely as your user and requests no privileges:
+
+- it starts `mpvpaper` (one process per live monitor) and `ffmpeg` (thumbnail
+  generation) — no other programs, and no shell built from video names;
+- it reads only the video folder you configure and writes only
+  `~/.cache/morph.livewall/thumbs`;
+- it does not download anything, has no network access of its own, and never
+  edits your Hyprland config (the keybinding line is copied to the clipboard
+  for you to paste).
 
 ## Limitations
 
