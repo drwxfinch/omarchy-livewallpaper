@@ -111,6 +111,19 @@ Every monitor that is playing Live runs its own mpv decoder, so two or three liv
 - switch monitors you are not looking at to Stock — mpvpaper is fully stopped in that mode;
 - pause the wallpapers when running on battery (`autoBattery`).
 
+## Privacy
+
+Opening the panel lists the video folder and generates a thumbnail for every
+listed video, not only for the one currently used as wallpaper (up to 120 files,
+nested three levels deep). Those frames are cached in
+`~/.cache/morph.livewall/thumbs` and are **not** deleted when a video is removed
+from the folder; clear that directory to drop them.
+
+The cache is created with mode `0700` and its thumbnails with `0600`, so another
+local account cannot read frames decoded from a `0600` video or a `0700` folder
+even when the login umask is `022`. Existing caches are tightened on the next
+panel open. The plugin does not rely on `$HOME` being `0700`.
+
 ## Limitations
 
 - **Widget coupling**: removing the widget from the bar disables the service (host semantics; re-add the widget to re-enable)
